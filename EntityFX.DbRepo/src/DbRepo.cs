@@ -1,7 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Infrastructure;
-using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace EntityFX;
 
@@ -80,19 +79,13 @@ public abstract class DbRepo<T, TId> : IDbRepo<T, TId> where T : class
 	public IQueryable<T> GET_PrimaryOrderedOrDefault(IQueryable<T> source)
 	{
 		ArgumentNullException.ThrowIfNull(source);
-
 		return PrimaryOrder == null
 			? source
 			: PrimaryOrder(source);
 	}
 
 	public IQueryable<T> GET_PrimaryOrderedOrDefault(bool? noTracking = null)
-	{
-		var q = Get(noTracking);
-		return PrimaryOrder == null
-			? q
-			: PrimaryOrder(q);
-	}
+		=> PrimaryOrder == null ? Get(noTracking) : PrimaryOrder(Get(noTracking));
 
 	#endregion
 

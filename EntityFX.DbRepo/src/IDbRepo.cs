@@ -9,7 +9,7 @@ public interface IDbRepo<T, TId> where T : class
 
 	// --- ABSTRACT MEMBERS ---
 
-	string IdToString(TId id);
+	//string IdToString(TId id);
 
 	bool IdNotSet(T item);
 	bool MatchesId(T item1, T item2);
@@ -28,7 +28,7 @@ public interface IDbRepo<T, TId> where T : class
 	void Upsert(T entity);
 
 	void Delete(T entity);
-	int Delete(TId id);
+	bool Delete(TId id);
 	int DeleteDirect(TId id);
 	Task<int> DeleteDirectAsync(TId id);
 

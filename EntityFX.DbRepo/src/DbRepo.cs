@@ -4,6 +4,12 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 
 namespace EntityFX;
 
+/// <summary>
+/// Generic repository base class for Entity Framework Core with flexible ID types.
+/// Handles common CRUD operations, "already tracked" scenarios, and provides extension points for custom behavior.
+/// </summary>
+/// <typeparam name="T">The entity type</typeparam>
+/// <typeparam name="TId">The primary key type (int, Guid, string, composite key, etc.)</typeparam>
 public abstract class DbRepo<T, TId> : IDbRepo<T, TId> where T : class
 {
 	// --- FIELDS ---
@@ -14,7 +20,15 @@ public abstract class DbRepo<T, TId> : IDbRepo<T, TId> where T : class
 
 	// === STATIC FIELDS ===
 
+	/// <summary>
+	/// Full table name including schema (e.g., "dbo.Users"). Cached per entity type.
+	/// Automatically populated from EF Core metadata on first repository instantiation.
+	/// </summary>
 	public static string FullTableName { get; private set; }
+
+	/// <summary>
+	/// Name of the primary key column. Defaults to "Id". Override in derived class if different.
+	/// </summary>
 	public static string IdName { get; set; } = "Id";
 
 
@@ -26,22 +40,38 @@ public abstract class DbRepo<T, TId> : IDbRepo<T, TId> where T : class
 		_dbSet = _dbContext.Set<T>();
 		_db = _dbContext.Database;
 
-		if(FullTableName == null) {
-			FullTableName = InternalEFCoreXtensions.GetTableSchemaName<T>(_dbContext);
-		}
+		if(FullTableName == null)
+			FullTableName = _dbContext.GetTableSchemaName<T>();
 	}
 
 	#region --- abstract / virtual members  ---
 
-	public virtual string IdToString(TId id) => id?.ToString();
-
+	/// <summary>
+	/// Builds a LINQ query to filter by the given ID. Required for GetById operations.
+	/// </summary>
+	/// <example>
+	/// <code>
+	/// public override IQueryable&lt;User&gt; WhereMatchTId(IQueryable&lt;User&gt; source, int id)
+	///     => source.Where(u => u.Id == id);
+	/// </code>
+	/// </example>
 	public abstract IQueryable<T> WhereMatchTId(IQueryable<T> source, TId id);
 
+	/// <summary>
+	/// Returns true if the entity's ID is not set (e.g., default value for identity columns).
+	/// Used by <see cref="Upsert"/> to determine insert vs update.
+	/// </summary>
 	public abstract bool IdNotSet(T item);
 
+	/// <summary>
+	/// Returns true if two entities have the same ID. Used when resolving already-tracked entities.
+	/// </summary>
 	public abstract bool MatchesId(T item1, T item2);
 
-
+	/// <summary>
+	/// When true (default), queries use AsNoTracking for better performance and to prevent memory leaks.
+	/// Set to false if you need change tracking for updates.
+	/// </summary>
 	public bool AsNoTracking { get; set; } = true;
 
 	/// <summary>
@@ -60,22 +90,28 @@ public abstract class DbRepo<T, TId> : IDbRepo<T, TId> where T : class
 
 	#region --- GET ---
 
+	/// <summary>
+	/// Retrieves a single entity by ID, or null if not found.
+	/// </summary>
 	public T GetById(TId id, bool? noTracking = null)
 		=> WhereMatchTId(Get(noTracking ?? AsNoTracking), id).FirstOrDefault();
 
+	/// <summary>
+	/// Asynchronously retrieves a single entity by ID, or null if not found.
+	/// </summary>
 	public async Task<T> GetByIdAsync(TId id, bool? noTracking = null)
 		=> await WhereMatchTId(Get(noTracking ?? AsNoTracking), id).FirstOrDefaultAsync();
 
+	/// <summary>
+	/// Returns the base DbSet queryable, optionally with AsNoTracking applied.
+	/// </summary>
 	public IQueryable<T> Get(bool? noTracking = null)
 		=> noTracking ?? AsNoTracking ? _dbSet.AsNoTracking() : _dbSet;
 
 	/// <summary>
-	/// If <see cref="PrimaryOrder"/> is set, will pass the input <paramref name="source"/>
-	/// through that to have it's items returned in that ordered way. ELSE just returns
-	/// input source with no problems.
+	/// Applies <see cref="PrimaryOrder"/> to the source if set, otherwise returns source unchanged.
+	/// Useful for ensuring consistent default ordering across repository methods.
 	/// </summary>
-	/// <param name="source"></param>
-	/// <returns></returns>
 	public IQueryable<T> GET_PrimaryOrderedOrDefault(IQueryable<T> source)
 	{
 		ArgumentNullException.ThrowIfNull(source);
@@ -84,6 +120,9 @@ public abstract class DbRepo<T, TId> : IDbRepo<T, TId> where T : class
 			: PrimaryOrder(source);
 	}
 
+	/// <summary>
+	/// Gets the DbSet with optional AsNoTracking and PrimaryOrder applied.
+	/// </summary>
 	public IQueryable<T> GET_PrimaryOrderedOrDefault(bool? noTracking = null)
 		=> PrimaryOrder == null ? Get(noTracking) : PrimaryOrder(Get(noTracking));
 
@@ -91,25 +130,43 @@ public abstract class DbRepo<T, TId> : IDbRepo<T, TId> where T : class
 
 	#region --- GetRange ---
 
+	/// <summary>
+	/// Returns a paged subset of entities with optional filtering and ordering.
+	/// Uses Skip/Take for pagination.
+	/// </summary>
+	/// <param name="index">Number of records to skip</param>
+	/// <param name="take">Number of records to return</param>
+	/// <param name="predicate">Optional filter expression</param>
+	/// <param name="noTracking">Override default tracking behavior</param>
 	public IQueryable<T> GetRange(
 		int index,
 		int take,
 		Expression<Func<T, bool>> predicate = null,
 		bool? noTracking = null)
 	{
-		var q = InternalEFCoreXtensions.WhereIf(GET_PrimaryOrderedOrDefault(noTracking), predicate != null, predicate)
+		var q = _WhereIf(GET_PrimaryOrderedOrDefault(noTracking), predicate != null, predicate)
 			.Skip(index)
 			.Take(take);
 		return q;
 	}
 
+	static IQueryable<T> _WhereIf(IQueryable<T> source, bool condition, Expression<Func<T, bool>> predicate)
+	{
+		if(condition)
+			return source.Where(predicate);
+		return source;
+	}
+
+	/// <summary>
+	/// Returns a paged subset from a custom source query with optional filtering.
+	/// </summary>
 	public IQueryable<T> GetRange(
 		IQueryable<T> source,
 		int index,
 		int take,
 		Expression<Func<T, bool>> predicate = null)
 	{
-		var q = InternalEFCoreXtensions.WhereIf(source, predicate != null, predicate)
+		var q = _WhereIf(source, predicate != null, predicate)
 			.Skip(index)
 			.Take(take);
 		return q;
@@ -120,9 +177,15 @@ public abstract class DbRepo<T, TId> : IDbRepo<T, TId> where T : class
 
 	#region --- Count ---
 
+	/// <summary>
+	/// Returns the total count of entities, optionally filtered by predicate.
+	/// </summary>
 	public int Count(Expression<Func<T, bool>> predicate = null)
 		=> predicate == null ? _dbSet.Count() : _dbSet.Count(predicate);
 
+	/// <summary>
+	/// Asynchronously returns the total count of entities, optionally filtered by predicate.
+	/// </summary>
 	public async Task<int> CountAsync(Expression<Func<T, bool>> predicate = null)
 		=> predicate == null ? await _dbSet.CountAsync() : await _dbSet.CountAsync(predicate);
 
@@ -131,6 +194,9 @@ public abstract class DbRepo<T, TId> : IDbRepo<T, TId> where T : class
 
 	// --- CUD ---
 
+	/// <summary>
+	/// Marks the entity for insertion. Call <see cref="SaveChanges"/> to persist.
+	/// </summary>
 	public void Add(T entity)
 	{
 		var dbEntityEntry = _dbContext.Entry(entity);
@@ -144,13 +210,14 @@ public abstract class DbRepo<T, TId> : IDbRepo<T, TId> where T : class
 	#region --- UPDATE ---
 
 	/// <summary>
-	/// Adds the entity if the entity.Id is equal to default(T),
-	/// else Updates instead.
+	/// Inserts if <see cref="IdNotSet"/> returns true, otherwise updates.
+	/// Useful for forms where you don't know if the entity is new or existing.
 	/// </summary>
 	public void Upsert(T entity)
 	{
 		ArgumentNullException.ThrowIfNull(entity);
-		if(DisableUpsert) throw new Exception("UPSERT is disabled for this type, see `DisableUpsert` property");
+		if(DisableUpsert)
+			throw new InvalidOperationException("UPSERT is disabled for this type, see `DisableUpsert` property");
 
 		if(IdNotSet(entity)) // GetIdFromT(entity).Equals(_defaultId)) // entity.Id.Equals(_defaultId))
 			Add(entity);
@@ -159,10 +226,9 @@ public abstract class DbRepo<T, TId> : IDbRepo<T, TId> where T : class
 	}
 
 	/// <summary>
-	/// Needed to fix: An object with the same key already exists in the ObjectStateManager.
-	/// http://stackoverflow.com/a/12587752/264031
+	/// Updates an entity, handling the "already tracked" scenario by merging values
+	/// into the existing tracked entity when necessary.
 	/// </summary>
-	/// <param name="entity"></param>
 	public void Update(T entity)
 	{
 		ArgumentNullException.ThrowIfNull(entity);
@@ -181,11 +247,11 @@ public abstract class DbRepo<T, TId> : IDbRepo<T, TId> where T : class
 	}
 
 	/// <summary>
-	/// 
-	/// //http://stackoverflow.com/questions/5749110/readonly-properties-in-ef-4-1/5749469#5749469
+	/// Updates only the specified properties. Useful for optimistic concurrency scenarios
+	/// where you want to update specific columns without loading the entire entity.
 	/// </summary>
-	/// <param name="entity"></param>
-	/// <param name="properties"></param>
+	/// <param name="entity">The entity with updated values</param>
+	/// <param name="properties">Expressions selecting which properties to update</param>
 	public void Update(T entity, params Expression<Func<T, object>>[] properties)
 	{
 		if(properties == null || properties.Length == 0)
@@ -215,6 +281,7 @@ public abstract class DbRepo<T, TId> : IDbRepo<T, TId> where T : class
 
 	#region --- DELETE ---
 
+	/// <summary>Marks the entity for deletion.</summary>
 	public void Delete(T entity)
 	{
 		var dbEntityEntry = _dbContext.Entry(entity);
@@ -226,69 +293,84 @@ public abstract class DbRepo<T, TId> : IDbRepo<T, TId> where T : class
 		}
 	}
 
-	public int Delete(TId id)
+	/// <summary>Retrieves the entity by ID and marks it for deletion.</summary>
+	/// <returns>True if entity was found and deleted, false if not found</returns>
+	public bool Delete(TId id)
 	{
 		var entity = GetById(id);
-		if(entity != null) // not found; assume already deleted.
-			Delete(entity);
-		return 0;
+		if(entity == null)
+			return false;
+		Delete(entity);
+		return true;
 	}
-
 
 	// --- DeleteDirect ---
 
-	public virtual string GetDeleteDirectSQL(TId id)
-	{
-		string sql = $"DELETE {FullTableName} WHERE {IdName} = {IdToString(id)}";
-		return sql;
-	}
+	/// <summary>
+	/// Returns a parameterized DELETE SQL statement. Override for complex ID types.
+	/// For simple types (int, Guid, string), the default implementation is secure and sufficient.
+	/// </summary>
+	public virtual FormattableString GetDeleteDirectSQL(TId id)
+		=> $"DELETE FROM {FullTableName} WHERE {IdName} = {id}";
 
+	/// <summary>
+	/// Executes a direct SQL DELETE, bypassing change tracking and EF Core interceptors.
+	/// Use for performance-critical bulk operations. Returns number of rows affected.
+	/// </summary>
 	public int DeleteDirect(TId id)
-		=> DbExecuteSqlCommand(GetDeleteDirectSQL(id));
+		=> _db.ExecuteSql(GetDeleteDirectSQL(id));
 
+	/// <summary>
+	/// Asynchronously executes a direct SQL DELETE. Returns number of rows affected.
+	/// </summary>
 	public async Task<int> DeleteDirectAsync(TId id)
-	{
-		string sql = GetDeleteDirectSQL(id);
-		return await DbExecuteSqlCommandAsync(sql);
-	}
+		=> await _db.ExecuteSqlAsync(GetDeleteDirectSQL(id));
+
+	//public virtual string IdToString(TId id) => id?.ToString();
 
 	#endregion
 
 
+	/// <summary>
+	/// Persists all changes to the database. Returns the number of affected rows.
+	/// </summary>
 	public int SaveChanges()
 		=> _dbContext.SaveChanges();
 
+	/// <summary>
+	/// Asynchronously persists all changes to the database. Returns the number of affected rows.
+	/// </summary>
 	public async Task<int> SaveChangesAsync()
 		=> await _dbContext.SaveChangesAsync();
-
-
-
-
-	// --- DbExecuteSqlCommand ---
-
-	protected int DbExecuteSqlCommand(string sql, params object[] args)
-	{
-		int result = args == null || args.Length < 1
-			? _db.ExecuteSqlRaw(sql)
-			: _db.ExecuteSqlRaw(sql, args);
-		return result;
-	}
-
-	protected async Task<int> DbExecuteSqlCommandAsync(string sql, params object[] args)
-	{
-		int result = args == null || args.Length < 1
-			? await _db.ExecuteSqlRawAsync(sql)
-			: await _db.ExecuteSqlRawAsync(sql, args); // TOTALLY stupid, if args is null, throws exception! but since it is a params, it should allow
-		return result;
-	}
 
 	//public void Dispose() => _dbContext?.Dispose();
 }
 
 /// <summary>
-/// For tables with an integer identity column. This makes
-/// `DbRepo` have a default type with now TId specified that is set to INT.
+/// Generic repository for entities with integer identity primary keys.
+/// Convenience base class that sets TId to int, so you only need to specify T.
 /// </summary>
+/// <typeparam name="T">The entity type</typeparam>
 public abstract class DbRepo<T>(DbContext context) : DbRepo<T, int>(context) where T : class
 {
 }
+
+#region --- DbExecuteSqlCommand (removed) ---
+
+//protected int DbExecuteSqlCommand(string sql, params object[] args)
+//{
+//	int result = args == null || args.Length < 1
+//		? _db.ExecuteSqlRaw(sql)
+//		: _db.ExecuteSqlRaw(sql, args);
+//	return result;
+//}
+
+//protected async Task<int> DbExecuteSqlCommandAsync(string sql, params object[] args)
+//{
+//	int result = args == null || args.Length < 1
+//		? await _db.ExecuteSqlRawAsync(sql)
+//		: await _db.ExecuteSqlRawAsync(sql, args); // TOTALLY stupid, if args is null, throws exception! but since it is a params, it should allow
+//	return result;
+//}
+
+#endregion
